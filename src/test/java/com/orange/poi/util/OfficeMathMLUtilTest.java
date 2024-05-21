@@ -35,5 +35,9 @@ public class OfficeMathMLUtilTest {
         mml = IOUtils.resourceToString("/mml/mml-env-cases.xml", StandardCharsets.UTF_8);
         omml = OfficeMathMLUtil.getInstance().convertMmlToOmml(mml);
         System.out.println(omml);
+
+        mml = IOUtils.resourceToString("/mml/mml-complex.xml", StandardCharsets.UTF_8);
+        omml = OfficeMathMLUtil.getInstance().convertMmlToOmml(mml);
+        System.out.println(omml);
     }
 }

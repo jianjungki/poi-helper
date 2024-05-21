@@ -1,10 +1,6 @@
 package com.orange.poi.util;
 
 import com.orange.poi.PoiUnitTool;
-import com.sun.imageio.plugins.jpeg.JPEG;
-import com.sun.imageio.plugins.jpeg.JPEGImageReader;
-import com.sun.imageio.plugins.jpeg.JPEGMetadata;
-import com.sun.imageio.plugins.png.PNGMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.w3c.dom.Node;
@@ -17,6 +13,7 @@ import javax.imageio.ImageWriteParam;
 import javax.imageio.ImageWriter;
 import javax.imageio.metadata.IIOInvalidTreeException;
 import javax.imageio.metadata.IIOMetadata;
+import javax.imageio.metadata.IIOMetadataFormatImpl;
 import javax.imageio.metadata.IIOMetadataNode;
 import javax.imageio.plugins.jpeg.JPEGImageWriteParam;
 import javax.imageio.stream.ImageInputStream;
@@ -37,7 +34,8 @@ import java.util.Iterator;
 public class ImageTool {
 
     private final static Logger logger = LoggerFactory.getLogger(ImageTool.class);
-
+    private final static String jpegNodeName = "javax_imageio_jpeg_image_1.0";
+    static Iterator<ImageReader> readers = ImageIO.getImageReadersByFormatName("JPEG");
     /**
      * jpeg 文件魔数，第 0 位
      */
@@ -82,6 +80,21 @@ public class ImageTool {
         return ImageIO.read(inputStream);
     }
 
+
+    // Helper method to recursively find a node in the metadata tree
+    private static Node findNode(Node rootNode, String nodeName) {
+        if (rootNode.getNodeName().equalsIgnoreCase(nodeName)) {
+            return rootNode;
+        }
+        for (int i = 0; i < rootNode.getChildNodes().getLength(); i++) {
+            Node found = findNode(rootNode.getChildNodes().item(i), nodeName);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
+    }
+
     /**
      * 重置图片的像素密度信息（默认重置为 96，只支持 jpg 和 png 图片），以修复 wps 在 win10 下打印图片缺失的 bug
      *
@@ -112,27 +125,40 @@ public class ImageTool {
             logger.error("imageFile={}", imageFile, e);
             return null;
         }
-        if (metadata instanceof JPEGMetadata) {
-            JPEGMetadata jpegMetadata = (JPEGMetadata) metadata;
-            Integer resUnits = getResUnits(jpegMetadata);
+        if (metadata.getNativeMetadataFormatName().equals(jpegNodeName)) {
+            Integer resUnits = getResUnits(metadata);
             if (resUnits != null && resUnits != 0) {
                 // 已指定了像素密度时，不再继续处理
                 return null;
             }
             try {
-                resetDensity(jpegMetadata);
+                resetDensity(metadata);
             } catch (IIOInvalidTreeException e) {
                 logger.error("imageFile={}", imageFile, e);
                 return null;
             }
             exName = "jpg";
-        } else if (metadata instanceof PNGMetadata) {
-            PNGMetadata pngMetadata = (PNGMetadata) metadata;
-            if (pngMetadata.pHYs_unitSpecifier != 0) {
-                // 已指定了像素密度时，不再继续处理
-                return null;
+        } else if ("png".equalsIgnoreCase(reader.getFormatName())) {
+
+            String formatName = metadata.getNativeMetadataFormatName();
+            Node rootNode = metadata.getAsTree(formatName);
+            Node pHYsNode = findNode(rootNode, "pHYs");
+            if (pHYsNode != null) {
+                // Assuming the attribute exists; error handling omitted for clarity
+                Node unitSpecifierNode = pHYsNode.getAttributes().getNamedItem("unitSpecifier");
+                if (unitSpecifierNode != null){
+                    int unitSpecifier = Integer.parseInt(unitSpecifierNode.getNodeValue());
+                    System.out.println("Unit Specifier: " + unitSpecifier);
+                    if (unitSpecifier != 0) {
+                        // Pixel density has been specified, no further processing needed
+                        return null;
+                    }
+                }
+
+                // Perform your logic here with unitSpecifier
             }
-            resetDensity(pngMetadata);
+
+            resetDensityPng(metadata);
             exName = "png";
         } else {
             throw new IllegalArgumentException("不支持的图片格式");
@@ -178,8 +204,8 @@ public class ImageTool {
         }
     }
 
-    private static void resetDensity(JPEGMetadata metadata) throws IIOInvalidTreeException {
-        final IIOMetadataNode newRootNode = new IIOMetadataNode(JPEG.nativeImageMetadataFormatName);
+    private static void resetDensity(IIOMetadata metadata) throws IIOInvalidTreeException {
+        final IIOMetadataNode newRootNode = new IIOMetadataNode(jpegNodeName);
 
         // 方法一
         final IIOMetadataNode mergeJFIFsubNode = new IIOMetadataNode("mergeJFIFsubNode");
@@ -197,7 +223,7 @@ public class ImageTool {
 
         newRootNode.appendChild(mergeJFIFsubNode);
         newRootNode.appendChild(new IIOMetadataNode("mergeSequenceSubNode"));
-        metadata.mergeTree(JPEG.nativeImageMetadataFormatName, newRootNode);
+        metadata.mergeTree(jpegNodeName, newRootNode);
 
         // 方法二
 //        final IIOMetadataNode dimensionNode = new IIOMetadataNode("Dimension");
@@ -211,11 +237,25 @@ public class ImageTool {
 //        metadata.mergeTree(IIOMetadataFormatImpl.standardMetadataFormatName, newRootNode);
     }
 
-    private static void resetDensity(PNGMetadata metadata) throws IIOInvalidTreeException {
-        metadata.pHYs_pixelsPerUnitXAxis = PNG_pHYs_pixelsPerUnit;
-        metadata.pHYs_pixelsPerUnitYAxis = PNG_pHYs_pixelsPerUnit;
-        metadata.pHYs_unitSpecifier = 1;
-        metadata.pHYs_present = true;
+    private static void resetDensityPng(IIOMetadata metadata) throws IIOInvalidTreeException {
+        String metadataFormat = IIOMetadataFormatImpl.standardMetadataFormatName;
+        IIOMetadataNode root = (IIOMetadataNode)metadata.getAsTree(metadataFormat);
+
+        IIOMetadataNode physNode = new IIOMetadataNode("pHYs");
+        physNode.setAttribute("pixelsPerUnitXAxis", Integer.toString(PNG_pHYs_pixelsPerUnit));
+        physNode.setAttribute("pixelsPerUnitYAxis", Integer.toString(PNG_pHYs_pixelsPerUnit));
+        physNode.setAttribute("unitSpecifier", Integer.toString(1)); // unitSpecifier should be 1 for meters
+        physNode.setAttribute("present", Boolean.toString(true));
+
+        Node existingPhysNode = findNode(root, "pHYs");
+        if (existingPhysNode != null) {
+            root.replaceChild(physNode, existingPhysNode);
+        } else {
+            root.appendChild(physNode);
+        }
+        // Now, set the updated metadata back to the ImageWriter
+        metadata.setFromTree(metadataFormat, root);
+
     }
 
     /**
@@ -225,7 +265,7 @@ public class ImageTool {
      *
      * @return
      */
-    private static Integer getResUnits(JPEGMetadata metadata) {
+    private static Integer getResUnits(IIOMetadata metadata) {
         String value = getJfifAttr(metadata, "resUnits");
         if (value == null) {
             return null;
@@ -240,8 +280,8 @@ public class ImageTool {
      *
      * @return
      */
-    private static String getJfifAttr(JPEGMetadata metadata, String attrName) {
-        Node metadataNode = metadata.getAsTree(JPEG.nativeImageMetadataFormatName);
+    private static String getJfifAttr(IIOMetadata metadata, String attrName) {
+        Node metadataNode = metadata.getAsTree(jpegNodeName);
 
         if (metadataNode != null) {
             Node child = metadataNode.getFirstChild();
@@ -273,6 +313,10 @@ public class ImageTool {
         }
         return (ImageReader) iter.next();
     }
+    private static boolean  isJPEGReader(ImageReader reader){
+        ImageReader nextReader = readers.next();
+        return reader.getClass() == nextReader.getClass();
+    }
 
     /**
      * 获取像素密度
@@ -293,7 +337,7 @@ public class ImageTool {
         if (reader == null) {
             return null;
         }
-        if (!(reader instanceof JPEGImageReader)) {
+        if (!isJPEGReader(reader)) {
             return null;
         }
         reader.setInput(imageInputStream, true, false);
@@ -305,26 +349,37 @@ public class ImageTool {
             logger.error("imageFile={}", imageFile, e);
             return null;
         }
-        if (metadata instanceof JPEGMetadata) {
-            JPEGMetadata jpegMetadata = (JPEGMetadata) metadata;
-            Integer resUnits = getResUnits(jpegMetadata);
+        if (metadata.getNativeMetadataFormatName().equals(jpegNodeName)) {
+            Integer resUnits = getResUnits(metadata);
             if (resUnits == null) {
                 return null;
             }
             if (resUnits == 1) {
                 // 暂时只支持 resUnits == 1 等情况
-                String value = getJfifAttr(jpegMetadata, "Xdensity");
+                String value = getJfifAttr(metadata, "Xdensity");
                 if (value == null) {
                     return null;
                 }
                 return Integer.parseInt(value);
             }
             return null;
-        } else if (metadata instanceof PNGMetadata) {
-            PNGMetadata pngMetadata = (PNGMetadata) metadata;
-            if (pngMetadata.pHYs_unitSpecifier == 1) {
-                // 暂时只支持 pHYs_unitSpecifier == 1 等情况
-                return pngMetadata.pHYs_pixelsPerUnitXAxis;
+        } else if ("png".equalsIgnoreCase(reader.getFormatName())) {
+            String formatName = metadata.getNativeMetadataFormatName();
+            Node rootNode = metadata.getAsTree(formatName);
+            Node pHYsNode = findNode(rootNode, "pHYs");
+            if (pHYsNode != null) {
+                // Assuming the attribute exists; error handling omitted for clarity
+                Node unitSpecifierNode = pHYsNode.getAttributes().getNamedItem("unitSpecifier");
+                if (unitSpecifierNode != null){
+                    int unitSpecifier = Integer.parseInt(unitSpecifierNode.getNodeValue());
+                    System.out.println("Unit Specifier: " + unitSpecifier);
+                    if (unitSpecifier == 1) {
+                        // Pixel density has been specified, no further processing needed
+                        return unitSpecifier;
+                    }
+                }
+
+                // Perform your logic here with unitSpecifier
             }
             return null;
         } else {
